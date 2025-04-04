@@ -89,9 +89,9 @@ class PPO_Clip:
         
     def take_action(self, state):
         """
-        # ? This Function is going to choice an ACTION to interact with ENV.
-        # @param state: A 1-dim list which Got from RL_ENV.
-        # @return: Return The Choiced Action.
+            # ? This Function is going to choice an ACTION to interact with ENV.
+            # @param state: A 1-dim list which Got from RL_ENV.
+            # @return: Return The Choiced Action.
 
         """
         # print("state is", state)
@@ -104,6 +104,14 @@ class PPO_Clip:
         return action.item()
     
     def update(self, trans_dict):
+        """
+            # ? This Function is going to Update Policy_Net and Value_Net When Each-Episode Ending.
+            # @param trans_dict: trans_dict include s, a, r, s', done. Each Value of this dict is the Date Collected 
+                                 from One-Episode Simulation. #! Attention. One-Episode Simulation.
+                                 Therefore, eg. states.shape is like (k, state_dim), reward's shape is (k, 1)
+            # @return: No Return.
+        
+        """
         states = torch.tensor(np.array(trans_dict['state'])).to(self.device) # Add a dim.
         # print(states.shape)
         actions = torch.tensor(trans_dict['action']).view(-1, 1).to(self.device) # Add a dim.
@@ -115,15 +123,24 @@ class PPO_Clip:
         next_states = torch.tensor(np.array(trans_dict['next_state'])).to(self.device) # Add a dim.
         # print(next_states)
         # print(self.critic(states))
-        td_target = rewards + self.gamma * self.critic(states)*(1-dones) # delta = r + b*v - v
+        td_target = rewards + self.gamma * self.critic(next_states)*(1 - dones) # delta = r + b*v' - v
         # print(td_target)
-        td_delta =td_target - self.critic(states) # After critic-net forward twice, does grident compute twice ???# todo
+        td_delta = td_target - self.critic(states) # 
         # print(td_delta)
-        GAE = compute_gae(gamma=self.gamma, lambda_=self.gae_lambda, td_delta=td_delta).to(self.device)
+        GAE = compute_gae(gamma=self.gamma, lambda_=self.gae_lambda, td_delta=td_delta).to(self.device) # GAE has no CG.
         # print(GAE)
-        log_old_policy_as = torch.log(self.actor(states).gather(1, actions)).detach() # find \pi_old (a | s)
+        log_old_policy_as = torch.log(self.actor(states).gather(1, actions)).detach() # find \pi_old (a | s) with no CG.
 
         for _ in range(self.epochs):
+            """
+                @* This loop is going to iterate new_policy / old_policy in ppo, althought we don't konw new_policy actually.
+                   But We can random choose a new_policy_0 and iterate epochs times. After each optimize, PPO ensure to maxium 
+                   the Return(State_Value_Function) and Policy_Obj_Function.
+                #! Attention. 
+                   All variables/tensors unrelated to Policy_Theta and Value_Output need to be detached.
+                #* Such as: P_GAE, P_old_pi_as in Policy-Net and td_target in Value-Net.
+
+            """
             new_log_policy_as = torch.log(self.actor(states).gather(1, actions)) # no-detach
             # print(new_log_policy_as)
             radio = torch.exp(new_log_policy_as - log_old_policy_as) # old_policy / new_policy
@@ -134,7 +151,10 @@ class PPO_Clip:
             actor_loss = torch.mean(-torch.min(ppo_min_x, ppo_min_y)) # argmax so SGD-Ascend therefore "-"
             # print(actor_loss)
             critic_loss = torch.mean(F.mse_loss(self.critic(states), td_target.detach()))
-            # 
+            # optimize.
+
+            self.actor_optimizer.zero_grad()
+            self.critic_optimizer.zero_grad()
             actor_loss.backward()
             critic_loss.backward()
             self.actor_optimizer.step()
@@ -211,6 +231,7 @@ def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
         # return_ls.append(episode_num) # save each episode return.
 
         agent.update(trans_dict=trans_dict)
+        # break
 
 
 if __name__ == '__main__':
