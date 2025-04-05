@@ -1,8 +1,9 @@
 """
-    #! File: This file include PPO-policy's main framework.
+    #! File: 
     #?
     #*
 """
+# import ma_gym
 # import gym 
 import torch
 import torch.nn.functional as F
@@ -13,8 +14,10 @@ import gymnasium as gym
 from gymnasium.core import Env
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+import highway_env
 
-log_path = './log/tmp'
+
+log_path = './log/ippo'
 # writer = SummaryWriter(log_path)
 
 class Policy_Net(torch.nn.Module):
@@ -22,7 +25,8 @@ class Policy_Net(torch.nn.Module):
         super().__init__()
 
         self.fc1 = torch.nn.Linear(state_dim, hidden_dim)
-        self.fc2 = torch.nn.Linear(hidden_dim, action_dim)
+        self.fc2 = torch.nn.Linear(hidden_dim, hidden_dim) # Add More.
+        self.fc3 = torch.nn.Linear(hidden_dim, 1)
     
     def forward(self, x):   
         """
@@ -31,14 +35,15 @@ class Policy_Net(torch.nn.Module):
         """
                                                         
         x = F.relu(self.fc1(x))     #* softmax's dim  = 1
-                                
-        return F.softmax(self.fc2(x), dim=1)    #* \frac{exp(xi)}{\sum_j \exp(xj)}
+        x = F.relu(self.fc2(x)) 
+        return F.softmax(self.fc3(x), dim=1)    #* \frac{exp(xi)}{\sum_j \exp(xj)}
 
 class Value_Net(torch.nn.Module):
     def __init__(self, state_dim, hidden_dim):
         super().__init__()
         self.fc1 = torch.nn.Linear(state_dim, hidden_dim)
-        self.fc2 = torch.nn.Linear(hidden_dim, 1)
+        self.fc2 = torch.nn.Linear(hidden_dim, hidden_dim) # Add More.
+        self.fc3 = torch.nn.Linear(hidden_dim, 1)
 
     def forward(self, x):   
         """
@@ -47,8 +52,8 @@ class Value_Net(torch.nn.Module):
         
         """
         x = F.relu(self.fc1(x))
-
-        return self.fc2(x)
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
 
 def compute_gae(gamma, lambda_, td_delta):
     """
@@ -94,8 +99,9 @@ class PPO_Clip:
             # @return: Return The Choiced Action.
 
         """
-        # print("state is", state)
+        state = state.reshape(-1) # 5 * 7 state_input reshape to [1,]
         state = torch.tensor([state], dtype=torch.float).to(device=self.device) # Add a dim to state, which used as batch_size_dim
+        # print(" state is", state, "shape is ", state.shape)
         probs = self.actor(state)
         # print(probs)
         action_dist = torch.distributions.Categorical(probs=probs)
@@ -112,7 +118,16 @@ class PPO_Clip:
             # @return: No Return.
         
         """
-        states = torch.tensor(np.array(trans_dict['state'])).to(self.device) # Add a dim.
+
+        trans_dict['state'] = np.array(trans_dict['state'])
+        trans_dict['state'] = trans_dict['state'].reshape((trans_dict['state'].shape[0], -1))
+
+        trans_dict['next_state'] = np.array(trans_dict['next_state'])
+        trans_dict['next_state'] = trans_dict['next_state'].reshape((trans_dict['next_state'].shape[0], -1))
+
+        # print(trans_dict['state'].shape)
+        # print(.reshape(trans_dict['state'].shape[0], -1));return
+        states = torch.tensor(trans_dict['state']).to(self.device) # Add a dim.
         # print(states.shape)
         actions = torch.tensor(trans_dict['action']).view(-1, 1).to(self.device) # Add a dim.
         # print(actions)
@@ -160,19 +175,65 @@ class PPO_Clip:
             self.actor_optimizer.step()
             self.critic_optimizer.step()
 
-# ! New Version Gymnasium Support Parallel ENV RUNNING. Use 1 temp.
-envs = gym.make("CartPole-v1", render_mode='human')       
 
-_, _ = envs.reset(seed=0)
+controlled_num = 5
+uncontrolled_num = 20
 
-# print(envs.observation_space.shape)
+env = gym.make('highway-v0', 
+    render_mode='rgb_array',
+    config={
+    "controlled_vehicles": controlled_num,
+    "vehicles_count": uncontrolled_num,
+    "ego_spacing" : 0.5,
+    "lanes_count": 12,
+    "vehicles_density": 0.8,
+    "simulation_frequency": 20,  # [Hz]
+    "policy_frequency": 1,  # [Hz]
+    "normalize_reward": True,
+    "collision_reward": -1, # 超参
+    "lane_change_reward": -0.05, # 变道惩罚
+    "reward_speed_range": [20, 30],  # 实际车速范围
+    "initial_lane_id": None,
+    "screen_width": 1800,  # [px]
+    "screen_height": 600,  # [px]
+    "centering_position": [0.1, 0.35],
+    "scaling": 5,
+    "action": {
+        "type": "MultiAgentAction",
+
+        "action_config": {
+            "type": "DiscreteMetaAction",
+        }
+    },
+    "observation": {
+        "type": "MultiAgentObservation",
+        "observation_config": {
+            "type": "Kinematics",
+            'lanes_count': 6,
+            "vehicles_count": 5, # 扩大观测空间
+            "features": ["presence", "x", "y", "vx", "vy","cos_h","sin_h"], # 对应修改，说不定presence可以去掉，或者说把vehicles_count参数调大
+            "features_range": {
+                "x": [-200, 200], # 防止归一化之后全是1 
+                "y": [-12, 12],
+                "vx": [-80, 80], 
+                "vy": [-80, 80]
+            },
+            "absolute": False, # 绝对位置,如果最后还是训练不出来，就改成相对的
+            "normalize" : True, # obs归一化
+            "order": "sorted", # "order"，"shuffled"
+        }   
+    }
+})
 
 
-state_num = envs.observation_space.shape[0]
+obs, _ = env.reset()
+env.render()
 
-action_num = envs.action_space.n
+state_num = obs[0].shape[0] * obs[0].shape[1]
 
-# print(action_num)
+action_num = env.action_space[0].n
+
+print(action_num)
 
 hidden_dim = 128
 
@@ -182,9 +243,9 @@ gae_lambda = 0.95
 
 epochs = 10
 
-actor_lr = 1e-3
+actor_lr = 3e-4
 
-critic_lr = 1e-2
+critic_lr = 1e-3
 
 clip_eps = 0.2
 
@@ -196,6 +257,7 @@ else:
     device = torch.device('cpu')
 print("Backend device is ", device)
 
+
 def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
     """ 
         #* @brief: It is a general train-pipeline.
@@ -204,33 +266,63 @@ def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
         #* @param: Episode-Number
         #* No return.
     """
-    return_ls = []
+    # return_ls = []
 
     for i in tqdm(range(num_episodes)):
-        trans_dict = {'state':[], 'action':[], 'next_state':[], 'reward':[], 'done':[]}
-        episode_return = 0
+        trans_dict_ls = []
+        for _ in range(controlled_num):
+            tmp_trans_dict= {'state':[], 'action':[], 'next_state':[], 'reward':[], 'done':[]}
+            trans_dict_ls.append(tmp_trans_dict)
+
+        # print(trans_dict_ls)
         state, _ = env.reset()
+        env.render()
+
         done = False
+        # crash = False
+        episode_return = 0
+
+        # state_ls = [0] * controlled_num
+        action_ls = [0] * controlled_num
+        # next_state_ls = [0] * controlled_num
+
+        state_ls = list(state)
 
         while not done:
-            action = agent.take_action(state=state)
-            next_state, reward, done, tranc, _ = env.step(action=action)
+            for i in range(controlled_num):
+                action_ls[i] = agent.take_action(state=state_ls[i])
+            
+            next_state, reward, done, tranc, info = env.step(action=tuple(action_ls))
+            # print(reward)
+            # crash = info['crashed']
+            env.render()
+            
+            next_state_ls = list(next_state)
+
             if tranc == True:
                 done = True
             
-            trans_dict['state'].append(state)
-            trans_dict['action'].append(action)
-            trans_dict['reward'].append(reward)
-            trans_dict['done'].append(done)
-            trans_dict['next_state'].append(next_state)
+            for i in range(controlled_num):
+                
+                # print(trans_dict_ls[i])
+                trans_dict_ls[i]['state'].append(state_ls[i])
+                trans_dict_ls[i]['action'].append(action_ls[i])
+                trans_dict_ls[i]['reward'].append(reward[i])
+                trans_dict_ls[i]['done'].append(done)
+                trans_dict_ls[i]['next_state'].append(next_state_ls[i])
 
-            state = next_state 
+            for i in range(controlled_num):
+                state_ls[i] = next_state_ls[i]
 
-            episode_return += reward
+            episode_return += sum(reward)
         
         # return_ls.append(episode_num) # save each episode return.
 
-        agent.update(trans_dict=trans_dict)
+        #! Update until All Done.
+        for i in range(controlled_num):
+            agent.update(trans_dict=trans_dict_ls[i])
+            # agent.update(trans_dict=trans_dict_0)
+            # agent.update(trans_dict=trans_dict_1)
         # break
 
 
@@ -241,7 +333,7 @@ if __name__ == '__main__':
                       gae_lambda=gae_lambda, epochs=epochs, gamma=gamma, device=device)
     
 
-    train_on_policy(env=envs, agent=bignut, num_episodes=episode_num)
+    train_on_policy(env=env, agent=bignut, num_episodes=episode_num)
     
 
 

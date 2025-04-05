@@ -1,8 +1,9 @@
 """
-    #! File: This file include PPO-policy's main framework.
+    #! File: Combat env is so hard to understand.
     #?
     #*
 """
+# import ma_gym
 # import gym 
 import torch
 import torch.nn.functional as F
@@ -13,8 +14,9 @@ import gymnasium as gym
 from gymnasium.core import Env
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from ma_gym.envs.combat.combat import Combat
 
-log_path = './log/tmp'
+log_path = './log/ippo'
 # writer = SummaryWriter(log_path)
 
 class Policy_Net(torch.nn.Module):
@@ -22,7 +24,8 @@ class Policy_Net(torch.nn.Module):
         super().__init__()
 
         self.fc1 = torch.nn.Linear(state_dim, hidden_dim)
-        self.fc2 = torch.nn.Linear(hidden_dim, action_dim)
+        self.fc2 = torch.nn.Linear(hidden_dim, hidden_dim) # Add More.
+        self.fc3 = torch.nn.Linear(hidden_dim, 1)
     
     def forward(self, x):   
         """
@@ -31,14 +34,15 @@ class Policy_Net(torch.nn.Module):
         """
                                                         
         x = F.relu(self.fc1(x))     #* softmax's dim  = 1
-                                
-        return F.softmax(self.fc2(x), dim=1)    #* \frac{exp(xi)}{\sum_j \exp(xj)}
+        x = F.relu(self.fc2(x)) 
+        return F.softmax(self.fc3(x), dim=1)    #* \frac{exp(xi)}{\sum_j \exp(xj)}
 
 class Value_Net(torch.nn.Module):
     def __init__(self, state_dim, hidden_dim):
         super().__init__()
         self.fc1 = torch.nn.Linear(state_dim, hidden_dim)
-        self.fc2 = torch.nn.Linear(hidden_dim, 1)
+        self.fc2 = torch.nn.Linear(hidden_dim, hidden_dim) # Add More.
+        self.fc3 = torch.nn.Linear(hidden_dim, 1)
 
     def forward(self, x):   
         """
@@ -47,8 +51,8 @@ class Value_Net(torch.nn.Module):
         
         """
         x = F.relu(self.fc1(x))
-
-        return self.fc2(x)
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
 
 def compute_gae(gamma, lambda_, td_delta):
     """
@@ -160,19 +164,24 @@ class PPO_Clip:
             self.actor_optimizer.step()
             self.critic_optimizer.step()
 
-# ! New Version Gymnasium Support Parallel ENV RUNNING. Use 1 temp.
-envs = gym.make("CartPole-v1", render_mode='human')       
 
-_, _ = envs.reset(seed=0)
+
+grid_size = (15, 15)
+team_size = 2
+
+envs = Combat(grid_shape=grid_size, n_agents=team_size, n_opponents=team_size) # 
+
+envs.reset()
 
 # print(envs.observation_space.shape)
 
 
-state_num = envs.observation_space.shape[0]
+state_num = envs.observation_space[0].shape[0]
+print(state_num)
 
-action_num = envs.action_space.n
+action_num = envs.action_space[0].n
 
-# print(action_num)
+print(action_num)
 
 hidden_dim = 128
 
@@ -182,9 +191,9 @@ gae_lambda = 0.95
 
 epochs = 10
 
-actor_lr = 1e-3
+actor_lr = 3e-4
 
-critic_lr = 1e-2
+critic_lr = 1e-3
 
 clip_eps = 0.2
 
@@ -196,53 +205,54 @@ else:
     device = torch.device('cpu')
 print("Backend device is ", device)
 
-def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
-    """ 
-        #* @brief: It is a general train-pipeline.
-        #* @param: GYM-ENV
-        #* @param: PPO-Agent
-        #* @param: Episode-Number
-        #* No return.
-    """
-    return_ls = []
-
-    for i in tqdm(range(num_episodes)):
-        trans_dict = {'state':[], 'action':[], 'next_state':[], 'reward':[], 'done':[]}
-        episode_return = 0
-        state, _ = env.reset()
-        done = False
-
-        while not done:
-            action = agent.take_action(state=state)
-            next_state, reward, done, tranc, _ = env.step(action=action)
-            if tranc == True:
-                done = True
-            
-            trans_dict['state'].append(state)
-            trans_dict['action'].append(action)
-            trans_dict['reward'].append(reward)
-            trans_dict['done'].append(done)
-            trans_dict['next_state'].append(next_state)
-
-            state = next_state 
-
-            episode_return += reward
-        
-        # return_ls.append(episode_num) # save each episode return.
-
-        agent.update(trans_dict=trans_dict)
-        # break
 
 
-if __name__ == '__main__':
-
-    bignut = PPO_Clip(state_dim=state_num, hidden_dim=hidden_dim, action_dim=action_num,
-                      actor_lr=actor_lr, critic_lr=critic_lr, clip_eps=clip_eps,
-                      gae_lambda=gae_lambda, epochs=epochs, gamma=gamma, device=device)
-    
-
-    train_on_policy(env=envs, agent=bignut, num_episodes=episode_num)
-    
-
-
-    
+win_list = []
+for i in range(10):
+    with tqdm(total=int(num_episodes / 10), desc='Iteration %d' % i) as pbar:
+        for i_episode in range(int(num_episodes / 10)):
+            transition_dict_1 = {
+                'states': [],
+                'actions': [],
+                'next_states': [],
+                'rewards': [],
+                'dones': []
+            }
+            transition_dict_2 = {
+                'states': [],
+                'actions': [],
+                'next_states': [],
+                'rewards': [],
+                'dones': []
+            }
+            s = env.reset()
+            terminal = False
+            while not terminal:
+                a_1 = agent.take_action(s[0])
+                a_2 = agent.take_action(s[1])
+                next_s, r, done, info = env.step([a_1, a_2])
+                transition_dict_1['states'].append(s[0])
+                transition_dict_1['actions'].append(a_1)
+                transition_dict_1['next_states'].append(next_s[0])
+                transition_dict_1['rewards'].append(
+                    r[0] + 100 if info['win'] else r[0] - 0.1)
+                transition_dict_1['dones'].append(False)
+                transition_dict_2['states'].append(s[1])
+                transition_dict_2['actions'].append(a_2)
+                transition_dict_2['next_states'].append(next_s[1])
+                transition_dict_2['rewards'].append(
+                    r[1] + 100 if info['win'] else r[1] - 0.1)
+                transition_dict_2['dones'].append(False)
+                s = next_s
+                terminal = all(done)
+            win_list.append(1 if info["win"] else 0)
+            agent.update(transition_dict_1)
+            agent.update(transition_dict_2)
+            if (i_episode + 1) % 100 == 0:
+                pbar.set_postfix({
+                    'episode':
+                    '%d' % (num_episodes / 10 * i + i_episode + 1),
+                    'return':
+                    '%.3f' % np.mean(win_list[-100:])
+                })
+            pbar.update(1)
