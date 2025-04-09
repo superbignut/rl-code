@@ -1,2 +1,4 @@
 rl-github.code-workspace
 main.ipynb
+**/__pycache__/
+**/log/

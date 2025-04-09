@@ -15,10 +15,22 @@ from gymnasium.core import Env
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import highway_env
+from utils import delete_dir_file # 删除文件夹下的所有文件和子文件夹
+from copy import deepcopy
+import subprocess
+import time
+from threading import Thread
+# from multiprocess.
+
+np.set_printoptions(precision=2, suppress=True) # np.array 输出打印两位小数, 禁止使用科学计数法
+
 
 
 log_path = './log/ippo'
-# writer = SummaryWriter(log_path)
+
+delete_dir_file("./log") # delete log
+
+writer = SummaryWriter(log_path) # create log
 
 class Policy_Net(torch.nn.Module):
     def __init__(self, state_dim, hidden_dim, action_dim):
@@ -26,7 +38,7 @@ class Policy_Net(torch.nn.Module):
 
         self.fc1 = torch.nn.Linear(state_dim, hidden_dim)
         self.fc2 = torch.nn.Linear(hidden_dim, hidden_dim) # Add More.
-        self.fc3 = torch.nn.Linear(hidden_dim, 1)
+        self.fc3 = torch.nn.Linear(hidden_dim, action_dim)
     
     def forward(self, x):   
         """
@@ -115,7 +127,7 @@ class PPO_Clip:
             # @param trans_dict: trans_dict include s, a, r, s', done. Each Value of this dict is the Date Collected 
                                  from One-Episode Simulation. #! Attention. One-Episode Simulation.
                                  Therefore, eg. states.shape is like (k, state_dim), reward's shape is (k, 1)
-            # @return: No Return.
+            # @return: Return actor_loss_average, critic_loss_average
         
         """
 
@@ -146,6 +158,9 @@ class PPO_Clip:
         # print(GAE)
         log_old_policy_as = torch.log(self.actor(states).gather(1, actions)).detach() # find \pi_old (a | s) with no CG.
 
+        actor_loss_ls = []
+        critic_loss_ls = []
+
         for _ in range(self.epochs):
             """
                 @* This loop is going to iterate new_policy / old_policy in ppo, althought we don't konw new_policy actually.
@@ -174,27 +189,53 @@ class PPO_Clip:
             critic_loss.backward()
             self.actor_optimizer.step()
             self.critic_optimizer.step()
+            actor_loss_ls.append(actor_loss)
+            critic_loss_ls.append(critic_loss)
+        
+        return sum(actor_loss_ls) / len(actor_loss_ls), sum(critic_loss_ls) / len(critic_loss_ls)
+
+controlled_num = 2
+uncontrolled_num = 40
 
 
-controlled_num = 5
-uncontrolled_num = 20
+"""
+simulation_frequency is the frequency used for the Euler integration of the dynamics, i.e. the physical simulation. 
+A high simulation frequency will give more accurate results, at the price of an increased computational load (since
+more intermediate timesteps need to be computed). I haven't experimented recently, but I think that the simulation 
+tends to become unstable under 5Hz. There is no upper bound, but at some point the benefits in terms of accuracy 
+become negligible. I'd say [5Hz, 15Hz] is a good range.
 
+policy_frequency, on the other hand, is the frequency at which the agent can take decisions. It cannot be higher than
+the simulation frequency, and this upper bound corresponds to the standard case where the agent provides a control 
+input for every simulated frame, which makes sense for e.g. low-level control (steering/throttle). But for high-level
+decisions, such as lane changes, it can be more sensible to have temporally extended actions: if a lane change takes 
+at least 1 second to execute, we do not need to take decisions at a higher frequency. Increasing the policy frequency 
+means that a call to the step() method will be faster, but in turn the corresponding simulated duration will be shorter.
+"""
 env = gym.make('highway-v0', 
     render_mode='rgb_array',
     config={
     "controlled_vehicles": controlled_num,
     "vehicles_count": uncontrolled_num,
     "ego_spacing" : 0.5,
-    "lanes_count": 12,
+    "lanes_count": 4,
     "vehicles_density": 0.8,
-    "simulation_frequency": 20,  # [Hz]
-    "policy_frequency": 1,  # [Hz]
-    "normalize_reward": True,
-    "collision_reward": -1, # 超参
-    "lane_change_reward": -0.05, # 变道惩罚
-    "reward_speed_range": [20, 30],  # 实际车速范围
+    "duration": 200,                # [s]
+    "simulation_frequency": 20,     # [Hz]
+    "policy_frequency": 1,          # [Hz]
+
+    "normalize_reward": False,      # 这里似乎是 False更合理
+
+    "collision_reward": -1,         # 碰撞奖励不易太大，否则车辆会陷入保守行驶策略
+
+    "lane_change_reward": -0.05,    # 变道惩罚, 这个应该是没有使用 obsolote
+    "right_lane_reward": 0.2,
+    "high_speed_reward":0.4,
+
+    "reward_speed_range": [20, 35],  # 实际车速范围 MAX_SPEED 在kinematics 有限制 是[-40, 40]
+
     "initial_lane_id": None,
-    "screen_width": 1800,  # [px]
+    "screen_width": 1200,  # [px]
     "screen_height": 600,  # [px]
     "centering_position": [0.1, 0.35],
     "scaling": 5,
@@ -209,8 +250,8 @@ env = gym.make('highway-v0',
         "type": "MultiAgentObservation",
         "observation_config": {
             "type": "Kinematics",
-            'lanes_count': 6,
-            "vehicles_count": 5, # 扩大观测空间
+            'lanes_count': 4,
+            "vehicles_count": 6, # 扩大观测空间
             "features": ["presence", "x", "y", "vx", "vy","cos_h","sin_h"], # 对应修改，说不定presence可以去掉，或者说把vehicles_count参数调大
             "features_range": {
                 "x": [-200, 200], # 防止归一化之后全是1 
@@ -218,9 +259,10 @@ env = gym.make('highway-v0',
                 "vx": [-80, 80], 
                 "vy": [-80, 80]
             },
-            "absolute": False, # 绝对位置,如果最后还是训练不出来，就改成相对的
+            "absolute": False, # 
             "normalize" : True, # obs归一化
             "order": "sorted", # "order"，"shuffled"
+            "see_behind" : True,
         }   
     }
 })
@@ -233,7 +275,7 @@ state_num = obs[0].shape[0] * obs[0].shape[1]
 
 action_num = env.action_space[0].n
 
-print(action_num)
+print("action num is : ", action_num)
 
 hidden_dim = 128
 
@@ -241,15 +283,15 @@ gamma = 0.98
 
 gae_lambda = 0.95
 
-epochs = 10
+epochs = 10 # 
 
-actor_lr = 3e-4
+actor_lr = 1e-5
 
-critic_lr = 1e-3
+critic_lr = 3e-5
 
 clip_eps = 0.2
 
-episode_num = 500
+episode_num = 1000
 
 if torch.cuda.is_available():
     device = torch.device("cuda:0")
@@ -268,8 +310,10 @@ def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
     """
     # return_ls = []
 
-    for i in tqdm(range(num_episodes)):
+    for episode_i in tqdm(range(num_episodes)):
+
         trans_dict_ls = []
+
         for _ in range(controlled_num):
             tmp_trans_dict= {'state':[], 'action':[], 'next_state':[], 'reward':[], 'done':[]}
             trans_dict_ls.append(tmp_trans_dict)
@@ -279,58 +323,91 @@ def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
         env.render()
 
         done = False
-        # crash = False
+
         episode_return = 0
 
-        # state_ls = [0] * controlled_num
-        action_ls = [0] * controlled_num
-        # next_state_ls = [0] * controlled_num
-
         state_ls = list(state)
+        
+        last_done = [False] * controlled_num # 上一个时刻就已经结束了
 
-        while not done:
-            for i in range(controlled_num):
-                action_ls[i] = agent.take_action(state=state_ls[i])
+        all_done = False
+
+        while not all_done:
+            # print(state_ls[0])
+            """ for car_i in range(controlled_num):
+                action_ls[car_i] = agent.take_action(state=state_ls[car_i]) """
+
+            action_ls = [agent.take_action(state=state_ls[car_i]) for car_i in range(controlled_num)]
             
+            print(" action is : ", action_ls)
             next_state, reward, done, tranc, info = env.step(action=tuple(action_ls))
-            # print(reward)
+            # print(" reward is ",reward)
+
+            """
+                如果一个车撞了之后, 这个reward一直是负的奖励,状态不变, 因此不应该持续更新
+                代码实现见 last_done
+            """
             # crash = info['crashed']
             env.render()
             
             next_state_ls = list(next_state)
 
-            if tranc == True:
-                done = True
+            if tranc == True or all(done) == True:
+                all_done = True
             
-            for i in range(controlled_num):
+            for dict_i in range(controlled_num):
                 
-                # print(trans_dict_ls[i])
-                trans_dict_ls[i]['state'].append(state_ls[i])
-                trans_dict_ls[i]['action'].append(action_ls[i])
-                trans_dict_ls[i]['reward'].append(reward[i])
-                trans_dict_ls[i]['done'].append(done)
-                trans_dict_ls[i]['next_state'].append(next_state_ls[i])
+                if last_done[dict_i] == True:
+                    # 如果上一个就已经结束了，不更新用于训练的 dict 与 episode 的 奖励输出
+                    continue
 
-            for i in range(controlled_num):
-                state_ls[i] = next_state_ls[i]
+                trans_dict_ls[dict_i]['state'].append(state_ls[dict_i])
+                trans_dict_ls[dict_i]['action'].append(action_ls[dict_i])
+                trans_dict_ls[dict_i]['reward'].append(reward[dict_i])
+                trans_dict_ls[dict_i]['done'].append(done[dict_i])
+                trans_dict_ls[dict_i]['next_state'].append(next_state_ls[dict_i])
 
-            episode_return += sum(reward)
+                episode_return += reward[dict_i] # return更新
+            
+            state_ls = next_state_ls # 更新状态
+            
+            last_done = done # 更新 done
         
         # return_ls.append(episode_num) # save each episode return.
+        # writer.add_scalar("ten_predict_acc: ", sum(return_ls[-10:]), i)
 
         #! Update until All Done.
-        for i in range(controlled_num):
-            agent.update(trans_dict=trans_dict_ls[i])
+        actor_loss = 0
+        critic_loss = 0
+        for update_i in range(controlled_num):
+            _loss = agent.update(trans_dict=trans_dict_ls[update_i])
+            actor_loss += _loss[0] ** 2 # 因为这个 loss 是负数， 所以给个平方看收敛
+            critic_loss += _loss[1]
             # agent.update(trans_dict=trans_dict_0)
             # agent.update(trans_dict=trans_dict_1)
         # break
+        writer.add_scalar("return :", episode_return, episode_i) # 
+        writer.add_scalar("actor_loss :", actor_loss, episode_i) # 
+        writer.add_scalar("critic_loss :", critic_loss, episode_i) # 
 
+def tensorboard_show():
+    
+    time.sleep(5)
+
+    command = ["tensorboard.exe", "--logdir=./log/ippo"]
+    process = subprocess.Popen(args=command)
+
+    print(process.pid)
 
 if __name__ == '__main__':
 
     bignut = PPO_Clip(state_dim=state_num, hidden_dim=hidden_dim, action_dim=action_num,
                       actor_lr=actor_lr, critic_lr=critic_lr, clip_eps=clip_eps,
                       gae_lambda=gae_lambda, epochs=epochs, gamma=gamma, device=device)
+    
+    tmp_thread = Thread(target=tensorboard_show, name="data_show_process")
+    
+    tmp_thread.start()
     
 
     train_on_policy(env=env, agent=bignut, num_episodes=episode_num)
