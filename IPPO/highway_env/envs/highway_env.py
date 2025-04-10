@@ -57,6 +57,10 @@ class HighwayEnv(AbstractEnv):
 
     def _create_road(self) -> None:
         """Create a road composed of straight adjacent lanes."""
+        # tmp_lane_speed_limit = self.config['reward_speed_range'][-1]
+        """
+            new lane speed limit...
+        """
         self.road = Road(
             network=RoadNetwork.straight_road_network(
                 self.config["lanes_count"], speed_limit=30
@@ -98,8 +102,26 @@ class HighwayEnv(AbstractEnv):
             vehicle.randomize_behavior()
             self.road.vehicles.append(vehicle)
 
+    def check_reasonable_action(self, action: Action) -> list:
+        """
+            this function can be used to check whether the action is reasonable.
 
-            
+            and return relative reward.
+        """
+
+        action_is_reasonable = [True] * len(self.controlled_vehicles)
+
+        min_l = 0 # 最左车道
+        max_r = self.config['lanes_count'] - 1 # 最右车道
+
+        for index, car in enumerate(self.controlled_vehicles):
+            if car.lane_index[2] == min_l and action[index] == 0: # 0: 'LANE_LEFT',
+                action_is_reasonable[index] = False
+            if car.lane_index[2] == max_r and action[index] == 2: # 2: 'LANE_RIGHT',
+                action_is_reasonable[index] = False
+        
+        return action_is_reasonable
+
 
 ############################################################################################################################
     def _reward(self, action: Action) -> float:
@@ -108,24 +130,41 @@ class HighwayEnv(AbstractEnv):
         :param action: the last action performed
         :return: the corresponding reward
         """
+        reasonable_action_reward = -0.1
+
+        action_reason = self.check_reasonable_action(action=action)
+
+        # print(action_reason)
+
+        #  print(self.controlled_vehicles[0].speed)  # 这里速度改不了，牵制太多
+
         all_rewards = self._rewards(action)
         # print(all_rewards)
         return_ls = []
+        # print(list(self.get_available_actions()))
+        # for i in range(len(self.controlled_vehicles)):
+            # print(self.controlled_vehicles[i].lane_index)
         
-        for item in all_rewards: # 对
+        for index, item in enumerate(all_rewards): # 对
+            
 
             reward = sum(
                 self.config.get(name, 0) * reward for name, reward in item.items()
             )
+
+            if action_reason[index] == False: # action is not reasonable:
+                
+                reward += reasonable_action_reward # action reason reward.
+
             # print("thi reward is :", reward)
             if self.config["normalize_reward"]:
                 reward = utils.lmap( # 归一化 [collision_reward, high_speed_reward + right_lane_reward]
                     reward,
                     [
-                        self.config["collision_reward"],
+                        self.config["collision_reward"] + reasonable_action_reward,
                         self.config["high_speed_reward"] + self.config["right_lane_reward"],
                     ],
-                    [0, 1],
+                    [0, 1], # 这里需不需要 归一化到 [-1, 1] ???
                 )
             # print(" it is ", item["on_road_reward"])
             reward *= item["on_road_reward"] #  这里应该是防止车开出去

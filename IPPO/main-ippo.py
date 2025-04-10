@@ -24,13 +24,13 @@ from threading import Thread
 
 np.set_printoptions(precision=2, suppress=True) # np.array 输出打印两位小数, 禁止使用科学计数法
 
-
-
 log_path = './log/ippo'
 
 delete_dir_file("./log") # delete log
 
 writer = SummaryWriter(log_path) # create log
+
+# global_index_i = 0 # 全局索引， 勿用
 
 class Policy_Net(torch.nn.Module):
     def __init__(self, state_dim, hidden_dim, action_dim):
@@ -85,7 +85,7 @@ def compute_gae(gamma, lambda_, td_delta):
 
 
 class PPO_Clip:
-    def __init__(self, state_dim, hidden_dim, action_dim, actor_lr, critic_lr, gae_lambda, epochs, clip_eps, gamma, device):
+    def __init__(self, state_dim, hidden_dim, action_dim, actor_lr, critic_lr, gae_lambda, epochs, clip_eps, gamma, max_grad_norm, device):
         """
         # @param gae_lambda: Used in Generial Advance Function Evaluate.
         # @param epochs:
@@ -102,6 +102,7 @@ class PPO_Clip:
         self.gae_lambda = gae_lambda
         self.epochs = epochs
         self.clip_eps = clip_eps
+        self.max_grad_norm = max_grad_norm
         self.device = device
         
     def take_action(self, state):
@@ -185,11 +186,15 @@ class PPO_Clip:
 
             self.actor_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
+
             actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(parameters=self.actor.parameters(), max_norm=self.max_grad_norm)    
             critic_loss.backward()
+            torch.nn.utils.clip_grad_norm_(parameters=self.critic.parameters(), max_norm=self.max_grad_norm)          
+
             self.actor_optimizer.step()
             self.critic_optimizer.step()
-            actor_loss_ls.append(actor_loss)
+            actor_loss_ls.append(actor_loss ** 2)
             critic_loss_ls.append(critic_loss)
         
         return sum(actor_loss_ls) / len(actor_loss_ls), sum(critic_loss_ls) / len(critic_loss_ls)
@@ -220,7 +225,7 @@ env = gym.make('highway-v0',
     "ego_spacing" : 0.5,
     "lanes_count": 4,
     "vehicles_density": 0.8,
-    "duration": 200,                # [s]
+    "duration": 150,                # [s]
     "simulation_frequency": 20,     # [Hz]
     "policy_frequency": 1,          # [Hz]
 
@@ -232,7 +237,7 @@ env = gym.make('highway-v0',
     "right_lane_reward": 0.2,
     "high_speed_reward":0.4,
 
-    "reward_speed_range": [20, 35],  # 实际车速范围 MAX_SPEED 在kinematics 有限制 是[-40, 40]
+    "reward_speed_range": [20, 30],  # 实际车速范围 MAX_SPEED 在kinematics 有限制 是[-40, 40]
 
     "initial_lane_id": None,
     "screen_width": 1200,  # [px]
@@ -252,17 +257,17 @@ env = gym.make('highway-v0',
             "type": "Kinematics",
             'lanes_count': 4,
             "vehicles_count": 6, # 扩大观测空间
-            "features": ["presence", "x", "y", "vx", "vy","cos_h","sin_h"], # 对应修改，说不定presence可以去掉，或者说把vehicles_count参数调大
+            "features": ["presence", "x", "y", "vx", "vy"], # 对应修改，说不定presence可以去掉，或者说把vehicles_count参数调大
             "features_range": {
                 "x": [-200, 200], # 防止归一化之后全是1 
                 "y": [-12, 12],
-                "vx": [-80, 80], 
-                "vy": [-80, 80]
+                "vx": [-50, 50], 
+                "vy": [-50, 50]
             },
             "absolute": False, # 
-            "normalize" : True, # obs归一化
+            "normalize": True, # obs归一化
             "order": "sorted", # "order"，"shuffled"
-            "see_behind" : True,
+            "see_behind": False,
         }   
     }
 })
@@ -277,21 +282,23 @@ action_num = env.action_space[0].n
 
 print("action num is : ", action_num)
 
-hidden_dim = 128
+hidden_dim = 512
 
-gamma = 0.98
+gamma = 0.9
 
-gae_lambda = 0.95
+gae_lambda = 0.9
 
-epochs = 10 # 
+epochs = 20 # 
 
-actor_lr = 1e-5
+actor_lr = 4e-5     # 调的再小一点呢
 
-critic_lr = 3e-5
+critic_lr = 1e-6    # 状态空间较大， 使用小的值函数更新速率进行迭代
 
 clip_eps = 0.2
 
-episode_num = 1000
+max_grad_norm = 0.5 # 具体的大小要根据 实际调整
+
+episode_num = 2000
 
 if torch.cuda.is_available():
     device = torch.device("cuda:0")
@@ -341,6 +348,7 @@ def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
             
             print(" action is : ", action_ls)
             next_state, reward, done, tranc, info = env.step(action=tuple(action_ls))
+            # print(env.get_available_actions())
             # print(" reward is ",reward)
 
             """
@@ -381,7 +389,7 @@ def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
         critic_loss = 0
         for update_i in range(controlled_num):
             _loss = agent.update(trans_dict=trans_dict_ls[update_i])
-            actor_loss += _loss[0] ** 2 # 因为这个 loss 是负数， 所以给个平方看收敛
+            actor_loss += _loss[0] # 因为这个 loss 是负数， 所以给个平方看收敛
             critic_loss += _loss[1]
             # agent.update(trans_dict=trans_dict_0)
             # agent.update(trans_dict=trans_dict_1)
@@ -403,7 +411,8 @@ if __name__ == '__main__':
 
     bignut = PPO_Clip(state_dim=state_num, hidden_dim=hidden_dim, action_dim=action_num,
                       actor_lr=actor_lr, critic_lr=critic_lr, clip_eps=clip_eps,
-                      gae_lambda=gae_lambda, epochs=epochs, gamma=gamma, device=device)
+                      gae_lambda=gae_lambda, epochs=epochs, gamma=gamma, max_grad_norm=max_grad_norm,
+                      device=device)
     
     tmp_thread = Thread(target=tensorboard_show, name="data_show_process")
     
@@ -413,5 +422,13 @@ if __name__ == '__main__':
     train_on_policy(env=env, agent=bignut, num_episodes=episode_num)
     
 
+"""
+    发现一个问题，动作总是趋向于 [1, 3] 也就是 不变道， 非常奇怪
 
+    有一个地方是, 车的速度只能加速到30，并不是 40 
+
+    暂时找不到 控制速度的位置
+
+
+"""
     

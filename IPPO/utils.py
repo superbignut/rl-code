@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import sys
 
 
@@ -19,3 +20,5 @@ def delete_dir_file(dir_path, root_dir_rm=False):
             delete_dir_file(os.path.join(dir_path, file_name), root_dir_rm=True)
     if root_dir_rm == True and os.path.exists(dir_path):
         os.rmdir(dir_path)
+
+
