@@ -69,7 +69,7 @@ class Value_Net(torch.nn.Module):
 
 def compute_gae(gamma, lambda_, td_delta):
     """
-    
+        # 这里可以引入一个 max episode len
     """
     td_delta = td_delta.detach().cpu().numpy() # "slice" below needs numpy().
     # print(td_delta)
@@ -85,7 +85,7 @@ def compute_gae(gamma, lambda_, td_delta):
 
 
 class PPO_Clip:
-    def __init__(self, state_dim, hidden_dim, action_dim, actor_lr, critic_lr, gae_lambda, epochs, clip_eps, gamma, max_grad_norm, device):
+    def __init__(self, state_dim, hidden_dim, action_dim, actor_lr, critic_lr, gae_lambda, epochs, clip_eps, gamma, max_grad_norm, entropy_cof, device):
         """
         # @param gae_lambda: Used in Generial Advance Function Evaluate.
         # @param epochs:
@@ -103,6 +103,7 @@ class PPO_Clip:
         self.epochs = epochs
         self.clip_eps = clip_eps
         self.max_grad_norm = max_grad_norm
+        self.entropy_cof = entropy_cof
         self.device = device
         
     def take_action(self, state):
@@ -157,7 +158,12 @@ class PPO_Clip:
         # print(td_delta)
         GAE = compute_gae(gamma=self.gamma, lambda_=self.gae_lambda, td_delta=td_delta).to(self.device) # GAE has no CG.
         # print(GAE)
-        log_old_policy_as = torch.log(self.actor(states).gather(1, actions)).detach() # find \pi_old (a | s) with no CG.
+
+        action_probs = self.actor(states)
+
+        action_dist = torch.distributions.Categorical(probs=action_probs)
+
+        log_old_policy_as = torch.log(action_probs.gather(1, actions)).detach() # find \pi_old (a | s) with no CG.
 
         actor_loss_ls = []
         critic_loss_ls = []
@@ -178,8 +184,12 @@ class PPO_Clip:
             # print(radio) ALL 1 ???? 
             ppo_min_x = radio * GAE
             ppo_min_y = torch.clamp(radio, 1-self.clip_eps, 1+self.clip_eps) * GAE # how does climp compute grident
+
+            # entropy 这里是在鼓励 动作分化？
+            entropy_loss = action_dist.entropy() # - \sigma log(p_i) * pi
+
             # print(ppo_min_y)
-            actor_loss = torch.mean(-torch.min(ppo_min_x, ppo_min_y)) # argmax so SGD-Ascend therefore "-"
+            actor_loss = torch.mean(-torch.min(ppo_min_x, ppo_min_y)) + self.entropy_cof * entropy_loss # argmax so SGD-Ascend therefore "-"
             # print(actor_loss)
             critic_loss = torch.mean(F.mse_loss(self.critic(states), td_target.detach()))
             # optimize.
@@ -298,6 +308,8 @@ clip_eps = 0.2
 
 max_grad_norm = 0.5 # 具体的大小要根据 实际调整
 
+entropy_cof = -0.01
+
 episode_num = 2000
 
 if torch.cuda.is_available():
@@ -412,7 +424,7 @@ if __name__ == '__main__':
     bignut = PPO_Clip(state_dim=state_num, hidden_dim=hidden_dim, action_dim=action_num,
                       actor_lr=actor_lr, critic_lr=critic_lr, clip_eps=clip_eps,
                       gae_lambda=gae_lambda, epochs=epochs, gamma=gamma, max_grad_norm=max_grad_norm,
-                      device=device)
+                      entropy_cof=entropy_cof, adevice=device)
     
     tmp_thread = Thread(target=tensorboard_show, name="data_show_process")
     
@@ -427,8 +439,12 @@ if __name__ == '__main__':
 
     有一个地方是, 车的速度只能加速到30，并不是 40 
 
-    暂时找不到 控制速度的位置
+    暂时找不到 控制速度的位置， 就先这样
 
+    
+    参考 IPPO 论文， 给出几个可以改进的地方：
+        
+        + 
 
 """
     
