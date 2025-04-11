@@ -85,7 +85,7 @@ def compute_gae(gamma, lambda_, td_delta):
 
 
 class PPO_Clip:
-    def __init__(self, state_dim, hidden_dim, action_dim, actor_lr, critic_lr, gae_lambda, epochs, clip_eps, gamma, max_grad_norm, entropy_cof, device):
+    def __init__(self, state_dim, hidden_dim, action_dim, ac_lr, gae_lambda, epochs, clip_eps, gamma, max_grad_norm, entropy_cof, critic_cof, device):
         """
         # @param gae_lambda: Used in Generial Advance Function Evaluate.
         # @param epochs:
@@ -95,8 +95,12 @@ class PPO_Clip:
         self.actor  = Policy_Net(state_dim=state_dim, hidden_dim=hidden_dim, action_dim=action_dim).to(device=device)
         self.critic = Value_Net(state_dim=state_dim, hidden_dim=hidden_dim).to(device=device)
 
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr = actor_lr)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr = critic_lr)
+        # self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr = actor_lr)
+        # self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr = critic_lr)
+
+        self.a_c_parameters = list(self.actor.parameters()) + list(self.critic.parameters())
+        
+        self.a_c_optimizer = torch.optim.Adam(self.a_c_parameters, lr=ac_lr)
 
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -104,6 +108,7 @@ class PPO_Clip:
         self.clip_eps = clip_eps
         self.max_grad_norm = max_grad_norm
         self.entropy_cof = entropy_cof
+        self.critic_cof = critic_cof
         self.device = device
         
     def take_action(self, state):
@@ -159,12 +164,6 @@ class PPO_Clip:
         GAE = compute_gae(gamma=self.gamma, lambda_=self.gae_lambda, td_delta=td_delta).to(self.device) # GAE has no CG.
         # print(GAE)
 
-        action_probs = self.actor(states)
-
-        action_dist = torch.distributions.Categorical(probs=action_probs)
-
-        log_old_policy_as = torch.log(action_probs.gather(1, actions)).detach() # find \pi_old (a | s) with no CG.
-
         actor_loss_ls = []
         critic_loss_ls = []
 
@@ -178,23 +177,41 @@ class PPO_Clip:
                 #* Such as: P_GAE, P_old_pi_as in Policy-Net and td_target in Value-Net.
 
             """
+            action_probs = self.actor(states)
+
+            action_dist = torch.distributions.Categorical(probs=action_probs)
+
+            log_old_policy_as = torch.log(action_probs.gather(1, actions)).detach() # find \pi_old (a | s) with no CG.
+
             new_log_policy_as = torch.log(self.actor(states).gather(1, actions)) # no-detach
             # print(new_log_policy_as)
             radio = torch.exp(new_log_policy_as - log_old_policy_as) # old_policy / new_policy
-            # print(radio) ALL 1 ???? 
+            
+            # print(radio) ALL 1 ?
             ppo_min_x = radio * GAE
             ppo_min_y = torch.clamp(radio, 1-self.clip_eps, 1+self.clip_eps) * GAE # how does climp compute grident
 
             # entropy 这里是在鼓励 动作分化？
+
             entropy_loss = action_dist.entropy() # - \sigma log(p_i) * pi
 
             # print(ppo_min_y)
-            actor_loss = torch.mean(-torch.min(ppo_min_x, ppo_min_y)) + self.entropy_cof * entropy_loss # argmax so SGD-Ascend therefore "-"
+            actor_loss = torch.mean(-torch.min(ppo_min_x, ppo_min_y) + self.entropy_cof * entropy_loss) # argmax so SGD-Ascend therefore "-"
             # print(actor_loss)
             critic_loss = torch.mean(F.mse_loss(self.critic(states), td_target.detach()))
             # optimize.
+            loss = actor_loss + self.critic_cof * critic_loss
 
-            self.actor_optimizer.zero_grad()
+            self.a_c_optimizer.zero_grad()
+
+            loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(parameters=self.a_c_parameters, max_norm=self.max_grad_norm)    
+
+            self.a_c_optimizer.step()
+
+        
+            """ self.actor_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
 
             actor_loss.backward()
@@ -203,7 +220,8 @@ class PPO_Clip:
             torch.nn.utils.clip_grad_norm_(parameters=self.critic.parameters(), max_norm=self.max_grad_norm)          
 
             self.actor_optimizer.step()
-            self.critic_optimizer.step()
+            self.critic_optimizer.step() """
+
             actor_loss_ls.append(actor_loss ** 2)
             critic_loss_ls.append(critic_loss)
         
@@ -243,9 +261,9 @@ env = gym.make('highway-v0',
 
     "collision_reward": -1,         # 碰撞奖励不易太大，否则车辆会陷入保守行驶策略
 
-    "lane_change_reward": -0.05,    # 变道惩罚, 这个应该是没有使用 obsolote
+    "lane_change_reward": 0,    # 变道惩罚, 这个应该是没有使用 obsolote
     "right_lane_reward": 0.2,
-    "high_speed_reward":0.4,
+    "high_speed_reward": 0.4,
 
     "reward_speed_range": [20, 30],  # 实际车速范围 MAX_SPEED 在kinematics 有限制 是[-40, 40]
 
@@ -300,15 +318,17 @@ gae_lambda = 0.9
 
 epochs = 20 # 
 
-actor_lr = 4e-5     # 调的再小一点呢
+ac_lr = 6e-5     # 调的再小一点呢
 
-critic_lr = 1e-6    # 状态空间较大， 使用小的值函数更新速率进行迭代
+# critic_lr = 1e-6    # 状态空间较大， 使用小的值函数更新速率进行迭代
 
 clip_eps = 0.2
 
 max_grad_norm = 0.5 # 具体的大小要根据 实际调整
 
-entropy_cof = -0.01
+entropy_cof = -0.1
+
+critic_cof = 0.8
 
 episode_num = 2000
 
@@ -358,7 +378,7 @@ def train_on_policy(env:Env, agent:PPO_Clip, num_episodes):
 
             action_ls = [agent.take_action(state=state_ls[car_i]) for car_i in range(controlled_num)]
             
-            print(" action is : ", action_ls)
+            # print(" action is : ", action_ls)
             next_state, reward, done, tranc, info = env.step(action=tuple(action_ls))
             # print(env.get_available_actions())
             # print(" reward is ",reward)
@@ -422,9 +442,9 @@ def tensorboard_show():
 if __name__ == '__main__':
 
     bignut = PPO_Clip(state_dim=state_num, hidden_dim=hidden_dim, action_dim=action_num,
-                      actor_lr=actor_lr, critic_lr=critic_lr, clip_eps=clip_eps,
-                      gae_lambda=gae_lambda, epochs=epochs, gamma=gamma, max_grad_norm=max_grad_norm,
-                      entropy_cof=entropy_cof, adevice=device)
+                      ac_lr=ac_lr, clip_eps=clip_eps, gae_lambda=gae_lambda,
+                      epochs=epochs, gamma=gamma, max_grad_norm=max_grad_norm,
+                      entropy_cof=entropy_cof,critic_cof=critic_cof, device=device)
     
     tmp_thread = Thread(target=tensorboard_show, name="data_show_process")
     
@@ -444,7 +464,19 @@ if __name__ == '__main__':
     
     参考 IPPO 论文， 给出几个可以改进的地方：
         
-        + 
+        + loss 统一 传播？
+        + entropy
+        + 优势函数标准化
+        + 暂时没有用 价值函数裁剪， 但是可以等价的把 价值函数的 loss 系数减小一点
+    
+    问题, 在只训练到 2% 的时候 就已经不转向了，收敛到局部最优有点太快了。
+
+    怎么调的慢一点
+    
+    # 这里的 entropy 确实有效果，训练到中间，看到了有明显的正确决策
+    # 接下来, 两个loss 要接着看一下
+    # GAE 标准化看一下
+    # entropy 也要看一下吧
 
 """
     
